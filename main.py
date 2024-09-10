@@ -1,4 +1,7 @@
 from flask import request,jsonify,session
+from flask_limiter import Limiter
+from flask_limiter.util import get_remote_address
+from flask_limiter.errors import RateLimitExceeded
 from models import app,db,User,Product,Sale
 from werkzeug.security import generate_password_hash,check_password_hash
 from datetime import datetime, timedelta
@@ -9,15 +12,26 @@ import jwt
 import secrets
 
 
-app.secret_key = secrets.token_hex(16)
+app.secret_key = secrets.token_bytes(16)
+
+limiter = Limiter(
+    get_remote_address,
+    app=app,
+    default_limits=['200 per day']
+)
+
 
 CORS(app,resources={
-     r"/login/*": {"origins": "http://127.0.0.1:5500"},
-     r"/register/*": {"origins": "http://127.0.0.1:5500"},
-     r"/products/*": {"origins": "http://127.0.0.1:5500"},
-     r"/sales/*": {"origins": "http://127.0.0.1:5500"}
-
+     r"*": {"origins": "*"}
 })
+
+@app.errorhandler(429)
+def rate_limit(e):
+    return jsonify({
+        "error":"Rate limit exceeded",
+        "message":"You have exceeded your request limit, try again later"
+    }),429
+
 
 
 @app.post('/register')
@@ -42,22 +56,29 @@ def register_user():
 
 
 @app.post('/login')
+@limiter.limit("5 per minute")
 def login_user():
-    data = request.json
-    username = data['username']
-    password = data['password']
-    existing_user = db.session.query(User).filter(User.username==username).first()
-    if not existing_user:
-        return jsonify({"Login failed":"Confirm login credentials"}), 401
     try:
-        if check_password_hash(existing_user.password, password):
-            access_token = jwt.encode({"sub": existing_user.username, "exp": datetime.utcnow()+timedelta(minutes=30)}, app.secret_key, algorithm='HS256')
-            return jsonify({"message":"Login Successful","access_token":access_token}), 201
-        else:
-            return jsonify({"Login failed":"Incorrect password"}), 401
-    except Exception as e:
-        return jsonify({"Error creating access token": str(e)}), 500
-    
+        data = request.json
+        username = data['username']
+        password = data['password']
+        existing_user = db.session.query(User).filter(User.username==username).first()
+        if not existing_user:
+            return jsonify({"Login failed":"Confirm login credentials"}), 401
+        try:
+            if check_password_hash(existing_user.password, password):
+                access_token = jwt.encode({"sub": existing_user.username, "exp": datetime.utcnow()+timedelta(minutes=30)}, app.secret_key, algorithm='HS256')
+                return jsonify({"message":"Login Successful","access_token":access_token}), 201
+            else:
+                return jsonify({"Login failed":"Incorrect password"}), 401
+        except Exception as e:
+            return jsonify({"Error creating access token": str(e)}), 500
+    except RateLimitExceeded:
+        return jsonify({
+            "Error":"Rate limit exceeded",
+            "Message":"Too many login attempts,please try again later"
+        })
+        
     
 def token_required(f):
     @wraps(f)
@@ -75,7 +96,8 @@ def token_required(f):
     
 
 @app.route('/products',methods=['GET','POST'])
-def products():
+@token_required
+def products(current_user):
     if request.method == 'POST':
         try:
             data = request.json
@@ -88,8 +110,12 @@ def products():
             db.session.commit()
             return jsonify({"Message":"Product added successfully"}),201
         except Exception as e:
-            return jsonify({"Error adding products":e})
+            return jsonify({"Error adding products":e}),500
     elif request.method == 'GET':
+        user = db.session.query(User).filter(current_user==User.username).first()
+        if not user:
+            return jsonify({"Message":"User not found"}),404
+
         products = db.session.execute(db.select(Product).order_by(Product.name)).scalars()
         product_data = []
         for product in products:
