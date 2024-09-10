@@ -14,17 +14,20 @@ import secrets
 
 app.secret_key = secrets.token_bytes(16)
 
+
+#uses get remote address to identify clients by IP address,,automatically uses request.remote_addr to identify client IP
 limiter = Limiter(
     get_remote_address,
     app=app,
     default_limits=['200 per day']
 )
 
-
+#allow all origins
 CORS(app,resources={
      r"*": {"origins": "*"}
 })
 
+#fallback error handler for rate limiting
 @app.errorhandler(429)
 def rate_limit(e):
     return jsonify({
