@@ -2,7 +2,7 @@ from flask import request,jsonify,session
 from flask_limiter import Limiter
 from flask_limiter.util import get_remote_address
 from flask_limiter.errors import RateLimitExceeded
-from models import app,db,User,Product,Sale
+from models import app,db,User,Product,Sale,func
 from werkzeug.security import generate_password_hash,check_password_hash
 from datetime import datetime, timedelta
 from flask_cors import CORS
@@ -22,10 +22,9 @@ limiter = Limiter(
     default_limits=['200 per day']
 )
 
+
 #allow all origins
-CORS(app,resources={
-     r"*": {"origins": "*"}
-})
+CORS(app, resources={r"/*": {"origins": "*"}})
 
 #fallback error handler for rate limiting
 @app.errorhandler(429)
@@ -34,7 +33,6 @@ def rate_limit(e):
         "error":"Rate limit exceeded",
         "message":"You have exceeded your request limit, try again later"
     }),429
-
 
 
 @app.post('/register')
@@ -63,9 +61,9 @@ def register_user():
 def login_user():
     try:
         data = request.json
-        username = data['username']
+        userdata = data['user']
         password = data['password']
-        existing_user = db.session.query(User).filter(User.username==username).first()
+        existing_user = db.session.query(User).filter(User.username==userdata or User.email==userdata).first()
         if not existing_user:
             return jsonify({"Login failed":"Confirm login credentials"}), 401
         try:
@@ -99,8 +97,8 @@ def token_required(f):
     
 
 @app.route('/products',methods=['GET','POST'])
-@token_required
-def products(current_user):
+# @token_required
+def products():
     if request.method == 'POST':
         try:
             data = request.json
@@ -115,9 +113,9 @@ def products(current_user):
         except Exception as e:
             return jsonify({"Error adding products":e}),500
     elif request.method == 'GET':
-        user = db.session.query(User).filter(current_user==User.username).first()
-        if not user:
-            return jsonify({"Message":"User not found"}),404
+        # user = db.session.query(User).filter(current_user==User.username).first()
+        # if not user:
+        #     return jsonify({"Message":"User not found"}),404
 
         products = db.session.execute(db.select(Product).order_by(Product.name)).scalars()
         product_data = []
@@ -133,6 +131,7 @@ def products(current_user):
     
 
 @app.route('/sales',methods=['GET','POST'])
+# @token_required
 def sales():
     if request.method == "POST":
         try:
@@ -158,7 +157,36 @@ def sales():
             })
         return jsonify({"sales":sales_data})
 
+@app.get("/dashboard")
+def dashboard():
+    sales_per_day = db.session.query(
+        func.date(Sale.created_at).label('date'),
+        func.sum(Sale.quantity * Product.selling_price).label('total_sales')
+    ).join(Product).group_by(func.date(Sale.created_at)).all()
+
+    profit_per_day = db.session.query(
+        func.date(Sale.created_at).label('date'),
+        func.sum((Sale.quantity * Product.selling_price)-
+                (Sale.quantity * Product.buying_price)).label("profit")
+    ).join(Product).group_by(func.date(Sale.created_at)).all()
+
+    profit_per_product = db.session.query((Product.name).label('product_name'),
+            func.sum((Sale.quantity * Product.selling_price)-(Sale.quantity*Product.buying_price)).label("profit")             
+            ).join(Product).group_by('product_name').all()
     
+    sales_per_product = db.session.query(
+        (Product.name).label("product_name"),
+        func.sum(Sale.quantity * Product.selling_price).label("day_sales")
+    ).join(Product).group_by('product_name').all()
+
+    sales_data = [{'date':str(day),'total_sales':sales} for day,sales in sales_per_day]
+    profit_data =[{'date':str(day),'profit':profit} for day,profit in profit_per_day]
+    product_profit = [{"product_name":product,"profit":profit} for product,profit in profit_per_product]
+    day_sales = [{"product_name":product,"day_sales":sale} for product,sale in sales_per_product]
+
+    return jsonify({"sales_per_day":sales_data,"profit_per_day":profit_data,"profit_per_product":product_profit,"sales_per_product":day_sales}),200
+
+
 
 if __name__ == '__main__':
     app.run(debug=True)
